@@ -4,6 +4,8 @@ import csv
 import zipfile
 import unicodedata
 from urllib.request import urlopen
+from multiprocessing import Pool, cpu_count
+from collections import defaultdict
 
 URL = "https://portaldatransparencia.gov.br/download-de-dados/pe-de-meia/202501"
 
@@ -30,6 +32,24 @@ def br_to_float(x: str) -> float:
     except ValueError:
         return 0.0
 
+# Esta função agora processa um pedaço das linhas
+def process_chunk(chunk, idx_uf, idx_valor):
+    resumo_parcial = defaultdict(lambda: [0, 0.0])
+    total_linhas_parcial = 0
+    for row in chunk:
+        total_linhas_parcial += 1
+        try:
+            uf = row[idx_uf].strip()
+        except IndexError:
+            uf = ''
+        try:
+            valor = br_to_float(row[idx_valor])
+        except IndexError:
+            valor = 0.0
+        resumo_parcial[uf][0] += 1
+        resumo_parcial[uf][1] += valor
+    return resumo_parcial, total_linhas_parcial
+
 def main():
     print("\n=== PÉ-DE-MEIA 2025-01 ===")
     print("URL:", URL)
@@ -38,7 +58,7 @@ def main():
 
     t_dl0 = time.perf_counter()
     with urlopen(URL, timeout=120) as resp:
-        zip_bytes = resp.read()  # lê TUDO para RAM
+        zip_bytes = resp.read()
     t_download = time.perf_counter() - t_dl0
 
     t_ld0 = time.perf_counter()
@@ -47,7 +67,7 @@ def main():
         if not csv_names:
             raise RuntimeError("ZIP não contém CSV.")
         with zf.open(csv_names[0]) as f:
-            raw_csv = f.read() 
+            raw_csv = f.read()
 
     text = raw_csv.decode("latin-1", errors="replace")
     reader = csv.reader(io.StringIO(text), delimiter=';', quotechar='"')
@@ -73,30 +93,34 @@ def main():
         raise
 
     t_calc0 = time.perf_counter()
-    resumo = {} 
+    # Ler todas as linhas em memória para poder fatiá-las
+    # Isso pode consumir muita RAM para arquivos enormes
+    linhas = list(reader)
+
+    num_processos = cpu_count()
+    chunk_size = len(linhas) // num_processos
+    if chunk_size == 0:
+        chunk_size = 1 # Garante que haja pelo menos um pedaço
+
+    chunks = [linhas[i:i + chunk_size] for i in range(0, len(linhas), chunk_size)]
+
+    # Usa um Pool de processos para paralelizar o processamento
+    with Pool(num_processos) as pool:
+        resultados = pool.starmap(process_chunk, [(chunk, idx_uf, idx_valor) for chunk in chunks])
+
+    resumo = defaultdict(lambda: [0, 0.0])
     total_linhas = 0
-
-    for row in reader:
-        total_linhas += 1
-        try:
-            uf = row[idx_uf].strip()
-        except IndexError:
-            uf = ''
-        try:
-            valor = br_to_float(row[idx_valor])
-        except IndexError:
-            valor = 0.0
-
-        if uf not in resumo:
-            resumo[uf] = [0, 0.0]
-        resumo[uf][0] += 1
-        resumo[uf][1] += valor
+    for resumo_parcial, total_linhas_parcial in resultados:
+        total_linhas += total_linhas_parcial
+        for uf, (cnt, soma) in resumo_parcial.items():
+            resumo[uf][0] += cnt
+            resumo[uf][1] += soma
 
     t_calculo = time.perf_counter() - t_calc0
     t_load = time.perf_counter() - t_ld0
     t_total = time.perf_counter() - t0
 
-    itens = [(uf, cnt, soma) for uf, (cnt, soma) in resumo.items()]
+    itens = sorted([(uf, cnt, soma) for uf, (cnt, soma) in resumo.items()], key=lambda x: x[2], reverse=True)
 
     print("\n[Métricas]")
     print(f"- tempo_download_s         : {t_download:.3f}")
@@ -105,6 +129,7 @@ def main():
     print(f"- tempo_total_s            : {t_total:.3f}")
     print(f"- linhas                   : {total_linhas}")
     print(f"- UFs encontradas          : {len(resumo)}")
+    print(f"- Processos utilizados     : {num_processos}")
 
     print("\n[Resumo por UF - Top 10 por valor_total]")
     print(f"{'UF':<4} {'TOTAL_PAGTOS':>14} {'VALOR_TOTAL':>16}")
