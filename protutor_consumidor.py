@@ -1,5 +1,6 @@
 # Guilherme Santigo Gomes 22407909
 # Cleudes Içami Kumeda Chirico 22401205
+# Lui Mendes Jaime 22400660
 
 import time
 import random
